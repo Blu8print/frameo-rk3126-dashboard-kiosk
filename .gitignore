@@ -1,0 +1,27 @@
+# Build output
+kiosk/build/
+*.apk
+*.idsig
+*.dex
+
+# Downloaded / verified at runtime, never committed
+*.img
+*.img.*
+webview*.apk
+*.so
+isrgroot*.pem
+isrg-root*.pem
+
+# Toolchains & SDKs
+android-sdk/
+cmdline-tools/
+jdk*/
+*.tar.gz
+*.zip
+
+# Local / editor
+.claude/
+.DS_Store
+*.log
+readback*.img
+backups/
