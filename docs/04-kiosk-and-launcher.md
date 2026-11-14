@@ -28,6 +28,73 @@ adb shell am start -n com.wesbos.homehq/.MainActivity \
 - The backlight sysfs (`/sys/class/backlight/rk28_bl/*`) is kernel read-only here, so the keyevent
   path is the way to a real off; `screenBrightness = 0` only dims an LCD.
 
+## The screen goes dark after 30 minutes
+
+Stock Android's **display inactivity timeout** is set to **30 minutes**
+(`screen_off_timeout=1800000`) on these frames, and **nothing in the kiosk keeps the display
+awake** — there is no `FLAG_KEEP_SCREEN_ON` or wake lock anywhere in the app. A wall-mounted
+frame gets no touch input, so the idle timer simply expires and the panel goes dark about half
+an hour after boot.
+
+This surprises people because it only starts *after* you replace Frameo: the Frameo app held the
+screen on itself, so swapping it for the kiosk exposes a timeout that was always configured.
+
+Disable it:
+
+```sh
+# Effectively never time out (max int ms, ~24.8 days)
+adb shell settings put system screen_off_timeout 2147483647
+
+# Belt and braces: stay awake whenever powered (these frames report AC powered)
+adb shell settings put global stay_on_while_plugged_in 7
+```
+
+Both are stored in the settings provider and survive reboots. Confirm they took effect:
+
+```sh
+adb shell settings get system screen_off_timeout        # 2147483647
+adb shell settings get global stay_on_while_plugged_in  # 7
+adb shell dumpsys power | grep -E 'mStayOn|mScreenOffTimeoutSetting'
+```
+
+`stay_on_while_plugged_in` is a bitmask — `1` AC, `2` USB, `4` wireless, `7` all. It only works
+if the frame reports as powered; check with `adb shell dumpsys battery` (`AC powered: true`,
+`mPlugType=1`).
+
+**These settings do not break the nightly schedule.** A stay-awake device still honours an
+explicit `keyevent 26`: tested with `mStayOn=true`, the display went to `Asleep`/`OFF` and stayed
+off, with `keyevent 224` waking it normally. So the schedule above remains the only thing that
+turns the panel off.
+
+### Why not `FLAG_KEEP_SCREEN_ON`?
+
+The obvious "proper kiosk" fix — adding `FLAG_KEEP_SCREEN_ON` to the activity — is deliberately
+**not** used here. It holds a screen-bright wake lock while the window is visible, which fights
+the nightly `keyevent 26` sleep, and it needs an APK rebuild. The two settings above are
+one-liners with no such conflict.
+
+### Predicting exactly when it will sleep
+
+`dumpsys power` exposes the idle timer, which makes this diagnosable rather than guesswork:
+
+```sh
+adb shell dumpsys power | grep -E 'mLastUserActivityTime|mScreenOffTimeoutSetting|mWakefulness'
+```
+
+`mLastUserActivityTime` is on the elapsed-realtime clock; add `mScreenOffTimeoutSetting` to it to
+get the moment the display will go off. A wake (`keyevent 224`, or boot) resets that timer.
+
+If the screen is going off and you want to know *what* did it, rule out the candidates in this
+order — on the unit this was written against, only the last one was guilty:
+
+| Suspect | How to check |
+|---|---|
+| Frameo running in the background | `adb shell ps \| grep frameo` — if there is no process, it isn't Frameo |
+| The kiosk's idle screensaver | `--ez screensaver false`, or check `screensaver` in `/data/data/com.wesbos.homehq/shared_prefs/kiosk.xml` |
+| The kiosk's nightly schedule | `adb shell dumpsys alarm \| grep -i homehq` — fires once daily, can't explain a 30-minute delay |
+| Something holding a wake lock | `adb shell dumpsys power \| grep -i 'Wake Locks'` — `size=0` means nothing is held |
+| **Stock inactivity timeout** | **`adb shell settings get system screen_off_timeout`** |
+
 ## Timezone (Android 6)
 
 ```sh

@@ -77,9 +77,10 @@ sectors**. Read, patch, and write it back with Rockchip loader mode and
 [`rkdeveloptool`](https://github.com/rockchip-linux/rkdeveloptool):
 
 ```sh
-# Frame in Loader mode (2207:310d). With the Frameo Beta Program on, re-plugging USB often
-# enumerates Loader mode automatically; otherwise use the MASKROM fallback:
-#   rkdeveloptool db rk3126_loader.bin
+# Frame in Loader mode (2207:310d). Re-plugging USB on a running frame is UNRELIABLE, even with
+# the Beta Program on - the dependable route is a cold boot with the cable already attached, and
+# you should confirm the session with `rkdeveloptool rci` before any read/write.
+# See docs/05-loader-mode-and-recovery.md for the procedure and the normal-looking errors.
 rkdeveloptool rl 0x14000 0x7000 boot.img            # read (KEEP THIS as your restore point)
 # ... patch boot.img's ramdisk (adbd + tcp port + /adb_keys) ...
 rkdeveloptool wl 0x14000 boot-patched.img           # write
@@ -106,3 +107,5 @@ Verify the gzip reads back to the same hash, and re-read a few partitions on-dev
 `/system/app/webview/webview.apk` specifically.
 
 → Next: [2. Upgrade WebView 44 → 106](02-webview-upgrade.md)
+
+If ADB stops working later, don't reflash blind — see [5. Loader mode & getting ADB back](05-loader-mode-and-recovery.md), which starts by ruling out the common causes (frame not booted, DHCP moved it).
