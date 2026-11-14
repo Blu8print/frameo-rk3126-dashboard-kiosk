@@ -104,6 +104,64 @@ adb shell am force-stop com.wesbos.homehq && adb shell am start -n com.wesbos.ho
 
 The property persists across reboots. Restart the kiosk so the page picks up the new zone.
 
+Check what the device thinks the time is, and whether it agrees with a known-good clock:
+
+```sh
+adb shell 'date; date +%s'; date +%s      # compare the two epochs - should match
+adb shell getprop persist.sys.timezone
+adb shell settings get global auto_time       # 1 = keep the clock NTP-synced
+adb shell settings get global auto_time_zone  # 0 is fine, see below
+```
+
+### Daylight saving changes on their own
+
+**You don't need to do anything for summer/winter time.** DST is encoded *inside* the zone, so
+`Europe/Amsterdam` switches by itself; `auto_time_zone=0` does not prevent it. That setting only
+controls whether the network may change *which zone* the device is in — which you don't want on a
+fixed-location frame anyway.
+
+You can verify it against the frame's own data rather than taking it on faith. Pull the device's
+timezone database and ask it directly:
+
+```sh
+adb pull /system/usr/share/zoneinfo/tzdata .
+python3 - <<'PY'
+import struct, io, datetime
+from zoneinfo import ZoneInfo
+b = open("tzdata","rb").read()
+print("version:", b[:12].rstrip(b"\0").decode())          # e.g. tzdata2016a
+idx, data, _ = struct.unpack(">III", b[12:24])
+zone = "Europe/Amsterdam"                                  # <- your zone
+for o in range(idx, data, 52):                             # 40b name + 3x uint32
+    if b[o:o+40].rstrip(b"\0").decode() == zone:
+        off, length, _ = struct.unpack(">III", b[o+40:o+52])
+        z = ZoneInfo.from_file(io.BytesIO(b[data+off:data+off+length]), key=zone)
+        for d in (datetime.datetime(2027,3,27,12), datetime.datetime(2027,3,28,12),
+                  datetime.datetime(2027,7,1,12), datetime.datetime(2027,10,31,12)):
+            a = d.replace(tzinfo=z)
+            print(f"  {d:%Y-%m-%d}: {a.tzname():5s} UTC{a.utcoffset()}")
+PY
+```
+
+On the unit this was written against (`tzdata2016a`) that prints CET before 2027-03-28, **CEST
+after it**, and CET again from 2027-10-31 — i.e. the transitions are present and will be applied.
+
+The **schedule survives the change too.** `MainActivity.scheduleOne` arms each alarm from a
+wall-clock minute-of-day and rolls it forward with `Calendar.add(Calendar.DAY_OF_MONTH, 1)`, which
+is calendar-field arithmetic that preserves wall-clock time across a DST boundary. (A fixed
+`+ 86400000` would have put a 22:00 alarm at 23:00 on the transition day — that is the bug to
+avoid if you rewrite this.) `ScreenScheduleReceiver` also re-arms from the saved minute-of-day
+after every firing, so the schedule recomputes daily and self-corrects regardless.
+
+Two caveats:
+
+- **Avoid schedule times in the skipped hour.** On spring-forward day 02:00–02:59 local does not
+  exist; `Calendar` in lenient mode rolls such a time into 03:xx. The 08:00/22:00 defaults are
+  nowhere near it.
+- An old `tzdata` is fine because the EU rule (last Sunday in March/October) is recurring and
+  already baked in. Only a *rule change* — e.g. the EU abolishing DST — would require updating
+  `tzdata`, which Android 6 will never receive by itself.
+
 ## Make it the Home launcher (boot to dashboard)
 
 This replaces Frameo as the launcher so a power-cycle lands on your dashboard.
