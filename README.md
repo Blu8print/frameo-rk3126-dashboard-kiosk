@@ -43,6 +43,7 @@ devices to untrusted networks.
 | **WebView 44 → 106** | Modern Chromium engine so a current web app actually renders (CSS Grid, ES modules, `fetch`, flexbox, service workers) |
 | **Modern CA roots** | Let's Encrypt **ISRG Root X1/X2** added so HTTPS sites validate on Android 6 |
 | **Kiosk app** | Full-screen WebView launcher (Wes Bos's **Home HQ**) patched to run on API 23, plus a **daily screen on/off schedule** and a **screensaver toggle** |
+| **Recovery tooling** | Scripts to find the frame when DHCP moves it, and to verify a boot image actually carries the ADB patch before you flash it |
 | **Boot to dashboard** | Kiosk set as the Home launcher, replacing Frameo, so a power-cycle lands on your dashboard |
 
 ---
@@ -81,8 +82,13 @@ See [docs/01-adb-root-backup.md](docs/01-adb-root-backup.md).
    Let's Encrypt; without ISRG Root X1/X2 most HTTPS sites fail to validate.
    Script: [`scripts/add-letsencrypt-roots.sh`](scripts/add-letsencrypt-roots.sh).
 4. **[Build, install & configure the kiosk](docs/04-kiosk-and-launcher.md)** — build the patched
-   kiosk APK, set your dashboard URL, configure the screen schedule, disable the screensaver, and
-   make it the Home launcher so it boots to your dashboard.
+   kiosk APK, set your dashboard URL, configure the screen schedule, **stop the screen going dark
+   after 30 minutes**, and make it the Home launcher so it boots to your dashboard.
+5. **[Loader mode & getting ADB back](docs/05-loader-mode-and-recovery.md)** — reaching Rockchip
+   loader mode reliably, reading/patching/restoring the boot partition, and recovering ADB when
+   the frame drops off the network.
+   Scripts: [`scripts/find-frame.sh`](scripts/find-frame.sh),
+   [`scripts/verify-krnl-adb-patch.py`](scripts/verify-krnl-adb-patch.py).
 
 Each `/system` step is reversible; every doc lists the undo.
 
@@ -121,6 +127,73 @@ The default URL baked into this repo is Wes Bos's public demo dashboard
 (`https://home-dashboard.wesbos.workers.dev`); set your own with the `url` extra above.
 
 ---
+
+## Loader mode & recovering ADB
+
+Rockchip **loader mode** (USB `2207:310d`) is the out-of-band path: raw partition read/write with
+[`rkdeveloptool`](https://github.com/rockchip-linux/rkdeveloptool), before Android exists. It is
+how the boot ramdisk gets patched for ADB over TCP, and how you restore a frame you broke.
+
+**Reaching it reliably** — hot-replugging USB on a running frame (even with Frameo's Beta Program
+on) is inconsistent. What works every time is a cold boot with the cable already attached:
+
+```sh
+# 1. unplug the frame's POWER entirely  2. connect the USB data cable to your computer
+# 3. power the frame back on            4. poll - it can take a full 50-60 seconds
+until lsusb -d 2207: ; do sleep 2; done
+rkdeveloptool ld      # must print: Loader
+rkdeveloptool rci     # ALWAYS confirm real comms before any read/write (16-byte chip info)
+```
+
+A recessed **pinhole button**, if your unit has one, drops straight to the loader — but confirm
+what yours does first; a pinhole on consumer hardware is sometimes a factory reset.
+
+Two outputs that look like failures but are **normal**: `db` → `The device does not support this
+operation!` (a loader is already running — expected when `rci` works) and `ppt` → `Not found any
+partition table!` (this board uses rkparameter, not GPT — use LBA offsets).
+
+Boot lives at LBA **`0x14000`**, length **`0x7000`** sectors:
+
+```sh
+rkdeveloptool rl 0x14000 0x7000 boot.img.stock   # read - keep as your restore point
+./scripts/verify-krnl-adb-patch.py boot.img.stock # check the 3 things ADB needs
+rkdeveloptool wl 0x14000 boot-patched.img        # write
+rkdeveloptool rd                                 # boot it
+```
+
+**Lost ADB over WiFi? Don't reach for loader mode yet.** `No route to host` is an ARP-level
+failure — the frame isn't answering at all — and the usual causes are mundane:
+
+```sh
+lsusb -d 2207:                 # anything listed = it's in LOADER mode, not booted → rkdeveloptool rd
+./scripts/find-frame.sh 20     # DHCP moved it? sweep for ADB, 20 rounds covers the ~50-60s boot
+```
+
+Only then suspect the image — and **verify instead of reflashing blind**: read the live partition
+back and compare it. A 14 MiB read takes seconds; a needless write adds risk for no information.
+Full detail, including a troubleshooting table: **[docs/05](docs/05-loader-mode-and-recovery.md)**.
+
+---
+
+## The screen goes dark after 30 minutes
+
+Not Frameo, and not the kiosk — it's stock Android's display inactivity timeout, set to
+**30 minutes** (`screen_off_timeout=1800000`). Nothing in the kiosk holds a wake lock, and a
+wall-mounted frame gets no touch input, so the timer just expires. It only starts happening after
+you replace Frameo, because the Frameo app held the screen on itself.
+
+```sh
+adb shell settings put system screen_off_timeout 2147483647    # ~24.8 days, effectively never
+adb shell settings put global stay_on_while_plugged_in 7       # stay awake whenever powered
+```
+
+Both persist across reboots, and **neither breaks the nightly screen schedule** — a stay-awake
+device still honours an explicit `keyevent 26` (tested: display slept and stayed off, `224` woke
+it). Adding `FLAG_KEEP_SCREEN_ON` to the app would *not* be safe here: it holds a screen-bright
+wake lock that fights the schedule. See [docs/04](docs/04-kiosk-and-launcher.md#the-screen-goes-dark-after-30-minutes)
+for how to tell which of Frameo / screensaver / schedule / wake lock / timeout is actually
+turning your panel off.
+
 
 ## Good to know
 
